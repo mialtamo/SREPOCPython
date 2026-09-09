@@ -88,20 +88,30 @@ def memory_stress(target_mb, hold_seconds, chunk_mb=10):
         log_event("memory_released", total_mb=total_mb)
 
 
-def simulated_memory_leak(rate_mb, duration):
+def simulated_memory_leak(rate_mb, duration, max_mb=4096):
     leaked = []
     start = time.time()
     total_mb = 0
-    log_event("memory_leak_started", rate_mb_per_second=rate_mb, duration_seconds=duration)
+    log_event("memory_leak_started", rate_mb_per_second=rate_mb, duration_seconds=duration, max_mb=max_mb)
 
-    while time.time() - start < duration:
-        leaked.append(bytearray(rate_mb * 1024 * 1024))
-        total_mb += rate_mb
-        log_event("memory_leak_growth", leaked_mb=total_mb)
-        time.sleep(1)
+    try:
+        while time.time() - start < duration:
+            if total_mb + rate_mb > max_mb:
+                log_event("memory_leak_cap_reached", leaked_mb=total_mb, max_mb=max_mb)
+                break
+            leaked.append(bytearray(rate_mb * 1024 * 1024))
+            total_mb += rate_mb
+            log_event("memory_leak_growth", leaked_mb=total_mb)
+            time.sleep(1)
 
-    log_event("memory_leak_completed", leaked_mb=total_mb)
-    time.sleep(5)
+        log_event("memory_leak_completed", leaked_mb=total_mb)
+        time.sleep(5)
+    except MemoryError:
+        log_event("memory_leak_oom", leaked_mb=total_mb)
+        logger.exception("MemoryError during simulated_memory_leak")
+    finally:
+        leaked.clear()
+        log_event("memory_leak_released", leaked_mb=total_mb)
 
 
 def exception_test():
@@ -155,6 +165,7 @@ def parse_args():
     leak = sub.add_parser("leak", help="Simulate gradual memory leak")
     leak.add_argument("--rate-mb", type=int, default=25)
     leak.add_argument("--duration", type=int, default=120)
+    leak.add_argument("--max-mb", type=int, default=4096, help="Safety cap in MB (1-16384)")
 
     sub.add_parser("exception", help="Generate an intentional unhandled exception")
 
@@ -177,6 +188,8 @@ def validate_args(args):
         raise ValueError("hold must be between 0 and 3600 seconds")
     if hasattr(args, "rate_mb") and not 1 <= args.rate_mb <= 100:
         raise ValueError("rate-mb must be between 1 and 100 MB/sec")
+    if hasattr(args, "max_mb") and not 1 <= args.max_mb <= 16384:
+        raise ValueError("max-mb must be between 1 and 16384 MB")
     if hasattr(args, "fail_every") and args.fail_every < 1:
         raise ValueError("fail-every must be at least 1")
 
@@ -191,7 +204,7 @@ def main():
     elif args.mode == "memory":
         memory_stress(args.mb, args.hold)
     elif args.mode == "leak":
-        simulated_memory_leak(args.rate_mb, args.duration)
+        simulated_memory_leak(args.rate_mb, args.duration, args.max_mb)
     elif args.mode == "exception":
         exception_test()
     elif args.mode == "intermittent":
